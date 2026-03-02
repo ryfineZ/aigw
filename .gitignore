@@ -1,0 +1,4 @@
+.env
+iflow-relay
+*.log
+.DS_Store

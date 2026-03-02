@@ -1,0 +1,14 @@
+{
+  "name": "iflow-relay",
+  "version": "1.0.0",
+  "description": "iFlow reverse proxy relay — Node.js rewrite",
+  "main": "index.js",
+  "bin": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "license": "MIT"
+}
