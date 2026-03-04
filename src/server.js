@@ -454,6 +454,157 @@ async function handleOpenAICompletionsViaAcp(cfg, bodyObj, stream, res) {
   }
 }
 
+/**
+ * 使用 ACP 模式处理 Anthropic 格式请求
+ * @param {object} cfg - 配置
+ * @param {object} bodyObj - Anthropic 格式请求体
+ * @param {boolean} stream - 是否流式响应
+ * @param {http.ServerResponse} res - 响应对象
+ */
+async function handleAnthropicMessagesViaAcp(cfg, bodyObj, stream, res) {
+  let openAIBody, model;
+  try {
+    const result = convertAnthropicToOpenAI(bodyObj, cfg.defaultModel);
+    openAIBody = result.body;
+    model = result.model;
+  } catch (err) {
+    if (stream) {
+      writeAnthropicSSEError(res, 400, err.message);
+      return;
+    }
+    writeAnthropicError(res, 400, err.message);
+    return;
+  }
+
+  const messages = openAIBody.messages || [];
+
+  if (messages.length === 0) {
+    if (stream) {
+      writeAnthropicSSEError(res, 400, 'messages is required');
+      return;
+    }
+    writeAnthropicError(res, 400, 'messages is required');
+    return;
+  }
+
+  try {
+    const client = await getAcpClient(cfg);
+
+    // 创建 session
+    await client.createSession({ model });
+
+    if (stream) {
+      // 流式响应
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.writeHead(200);
+
+      const messageId = `msg_${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
+
+      // 发送 message_start 事件
+      writeAnthropicEvent(res, 'message_start', {
+        type: 'message_start',
+        message: {
+          id: messageId,
+          type: 'message',
+          role: 'assistant',
+          model,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      });
+
+      // 发送 content_block_start
+      writeAnthropicEvent(res, 'content_block_start', {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      });
+
+      // 发送 prompt 并收集流式响应
+      const prompt = messagesToPrompt(messages);
+      let fullContent = '';
+
+      await client.prompt(prompt, {
+        model,
+        onChunk: (chunk) => {
+          fullContent += chunk;
+          // 发送 text_delta 事件
+          writeAnthropicEvent(res, 'content_block_delta', {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: chunk },
+          });
+        },
+      });
+
+      // 发送 content_block_stop
+      writeAnthropicEvent(res, 'content_block_stop', {
+        type: 'content_block_stop',
+        index: 0,
+      });
+
+      // 发送 message_delta
+      writeAnthropicEvent(res, 'message_delta', {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn', stop_sequence: null },
+        usage: { output_tokens: 0 },
+      });
+
+      // 发送 message_stop
+      writeAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
+      res.end();
+    } else {
+      // 非流式响应
+      const prompt = messagesToPrompt(messages);
+      const result = await client.prompt(prompt, { model });
+
+      // 构建 Anthropic 格式响应
+      const anthropicResp = {
+        id: `msg_${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`,
+        type: 'message',
+        role: 'assistant',
+        model,
+        content: [{ type: 'text', text: result.text }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      };
+
+      res.setHeader('Content-Type', 'application/json');
+      res.writeHead(200);
+      res.end(JSON.stringify(anthropicResp));
+    }
+  } catch (err) {
+    console.error('[acp] error:', err.message);
+    if (!res.headersSent) {
+      if (stream) {
+        writeAnthropicSSEError(res, 502, `ACP error: ${err.message}`);
+      } else {
+        writeAnthropicError(res, 502, `ACP error: ${err.message}`);
+      }
+    } else {
+      writeAnthropicEvent(res, 'error', {
+        type: 'error',
+        error: { type: 'api_error', message: `ACP error: ${err.message}` },
+      });
+      res.end();
+    }
+  }
+}
+
+/**
+ * 写入 Anthropic SSE 事件
+ */
+function writeAnthropicEvent(res, eventName, payload) {
+  const body = JSON.stringify(payload);
+  res.write(`event: ${eventName}\ndata: ${body}\n\n`);
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 function handleHealth(req, res) {
@@ -857,6 +1008,23 @@ async function handleAnthropicMessages(cfg, req, res) {
 
   const stream = !!bodyObj.stream;
 
+  // 检查是否使用 ACP 模式
+  try {
+    if (await shouldUseAcp(cfg)) {
+      console.log('[server] using ACP mode for Anthropic endpoint (via iFlow CLI)');
+      return handleAnthropicMessagesViaAcp(cfg, bodyObj, stream, res);
+    }
+  } catch (err) {
+    // ACP 启用但 iFlow CLI 不可用，返回错误
+    if (stream) {
+      writeAnthropicSSEError(res, 503, err.message);
+    } else {
+      writeAnthropicError(res, 503, err.message);
+    }
+    return;
+  }
+
+  // 以下是原来的 HTTP 模式
   let openAIBody, model;
   try {
     const result = convertAnthropicToOpenAI(bodyObj, cfg.defaultModel);
