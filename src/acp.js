@@ -51,9 +51,11 @@ class AcpClient {
 
       this.ws = new WebSocket(url);
 
-      const timeout = setTimeout(() => {
+      const connectionTimeout = setTimeout(() => {
         reject(new Error(`ACP connection timeout after ${this.timeout}s`));
-        this.ws.close();
+        if (this.ws) {
+          this.ws.close();
+        }
       }, this.timeout * 1000);
 
       this.ws.on('open', () => {
@@ -62,11 +64,11 @@ class AcpClient {
 
       this.ws.on('message', (data) => {
         const text = data.toString();
-        this.handleMessage(text, resolve, reject);
+        this.handleMessage(text, resolve, reject, connectionTimeout);
       });
 
       this.ws.on('error', (err) => {
-        clearTimeout(timeout);
+        clearTimeout(connectionTimeout);
         reject(new Error(`ACP WebSocket error: ${err.message}`));
       });
 
@@ -80,7 +82,7 @@ class AcpClient {
   /**
    * 处理接收到的消息
    */
-  handleMessage(text, connectResolve, connectReject) {
+  handleMessage(text, connectResolve, connectReject, connectionTimeout) {
     // 控制消息
     if (text.startsWith('//')) {
       const ctrl = text.trim();
@@ -90,10 +92,12 @@ class AcpClient {
         this.connected = true;
         this.sendInitialize()
           .then(() => {
+            clearTimeout(connectionTimeout);
             this.log('Initialized');
             connectResolve();
           })
           .catch((err) => {
+            clearTimeout(connectionTimeout);
             connectReject(err);
           });
       }
@@ -180,7 +184,7 @@ class AcpClient {
    * @param {string} prompt - 用户输入
    * @param {object} options
    * @param {function} options.onChunk - 流式响应回调 (chunk: string) => void
-   * @returns {Promise<string>} 完整响应文本
+   * @returns {Promise<{text: string, sessionId: string}>} 完整响应
    */
   async prompt(prompt, options = {}) {
     if (!this.sessionId) {
@@ -190,6 +194,7 @@ class AcpClient {
     return new Promise((resolve, reject) => {
       let fullText = '';
       let stopReason = null;
+      const currentSessionId = this.sessionId;
 
       this.onUpdate = (params) => {
         const update = params.update || {};
@@ -217,7 +222,8 @@ class AcpClient {
           if (result.stopReason) {
             stopReason = result.stopReason;
           }
-          resolve(fullText);
+          this.log(`Prompt completed: stopReason=${stopReason}, text=${fullText.substring(0, 50)}...`);
+          resolve({ text: fullText, sessionId: currentSessionId });
         })
         .catch((err) => {
           this.onUpdate = null;
@@ -245,12 +251,26 @@ class AcpClient {
       this.ws.send(JSON.stringify(request));
 
       // 设置超时
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
           reject(new Error(`Request ${method} timeout`));
         }
       }, this.timeout * 1000);
+
+      // 清理定时器当请求完成时
+      const originalResolve = this.pendingRequests.get(id).resolve;
+      const originalReject = this.pendingRequests.get(id).reject;
+      this.pendingRequests.set(id, {
+        resolve: (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        }
+      });
     });
   }
 
@@ -258,10 +278,10 @@ class AcpClient {
    * 断开连接
    */
   async disconnect() {
-    if (this.ws) {
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
       this.ws.close();
-      this.ws = null;
     }
+    this.ws = null;
     this.connected = false;
     this.sessionId = null;
   }
