@@ -186,9 +186,20 @@ function validateApiKey(key) {
 
 async function testProvider(url, key, fullModels = false) {
   const startTime = Date.now();
+  const result = {
+    success: false,
+    latency: 0,
+    modelCount: 0,
+    models: [],
+    allModels: [],
+    statusCode: null,
+    error: null,
+    warning: null, // 警告信息（如模型列表不可用）
+  };
 
+  // 测试1: 尝试获取模型列表
   try {
-    const response = await httpRequest(`${url}/models`, {
+    const modelsResponse = await httpRequest(`${url}/models`, {
       headers: {
         'authorization': `Bearer ${key}`,
         'user-agent': 'iFlow-Cli',
@@ -197,48 +208,80 @@ async function testProvider(url, key, fullModels = false) {
       timeout: 15000,
     });
 
-    const latency = Date.now() - startTime;
+    result.latency = Date.now() - startTime;
+    result.statusCode = modelsResponse.statusCode;
 
-    if (response.statusCode === 200) {
-      let modelCount = 0;
-      let models = [];
-      let allModels = [];
+    if (modelsResponse.statusCode === 200) {
+      // 模型列表获取成功
+      result.success = true;
       try {
-        const json = JSON.parse(response.data);
+        const json = JSON.parse(modelsResponse.data);
         if (json.data && Array.isArray(json.data)) {
-          modelCount = json.data.length;
-          allModels = json.data.map(m => m.id);
-          models = fullModels ? allModels : allModels.slice(0, 5);
+          result.modelCount = json.data.length;
+          result.allModels = json.data.map(m => m.id);
+          result.models = fullModels ? result.allModels : result.allModels.slice(0, 5);
         }
       } catch (_) {}
-      return {
-        success: true,
-        latency,
-        modelCount,
-        models,
-        allModels,
-        statusCode: response.statusCode,
-      };
-    } else {
-      let errorMsg = response.data;
-      try {
-        const json = JSON.parse(response.data);
-        errorMsg = json.error?.message || json.message || response.data.substring(0, 200);
-      } catch (_) {}
-      return {
-        success: false,
-        latency,
-        statusCode: response.statusCode,
-        error: errorMsg,
-      };
+      return result;
     }
   } catch (err) {
-    return {
-      success: false,
-      latency: Date.now() - startTime,
-      error: err.message,
-    };
+    // 模型列表请求失败，继续尝试连通性测试
   }
+
+  // 测试2: 连通性测试 - 发送一个简单请求
+  try {
+    const testResponse = await httpRequest(`${url}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'authorization': `Bearer ${key}`,
+        'content-type': 'application/json',
+        'user-agent': 'iFlow-Cli',
+        'accept': '*/*',
+      },
+      body: JSON.stringify({
+        model: 'test',
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1,
+      }),
+      timeout: 15000,
+    });
+
+    result.latency = Date.now() - startTime;
+    result.statusCode = testResponse.statusCode;
+
+    // 400 (模型不存在) 或 401 (认证成功但模型错误) 都说明连接成功
+    if (testResponse.statusCode === 400 || testResponse.statusCode === 401) {
+      result.success = true;
+      result.warning = '模型列表端点不可用，但服务连接正常。请手动配置模型名称。';
+
+      // 尝试解析错误信息
+      try {
+        const json = JSON.parse(testResponse.data);
+        if (json.error?.message) {
+          result.warning += `\n服务返回: ${json.error.message}`;
+        }
+      } catch (_) {}
+
+      return result;
+    }
+
+    // 其他错误状态码
+    if (testResponse.statusCode >= 400) {
+      try {
+        const json = JSON.parse(testResponse.data);
+        result.error = json.error?.message || json.message || `HTTP ${testResponse.statusCode}`;
+      } catch (_) {
+        result.error = `HTTP ${testResponse.statusCode}`;
+      }
+      return result;
+    }
+  } catch (err) {
+    result.latency = Date.now() - startTime;
+    result.error = err.message;
+    return result;
+  }
+
+  return result;
 }
 
 // ─── Provider 管理 ────────────────────────────────────────────────────────────
@@ -372,11 +415,16 @@ async function cmdModels() {
     try {
       const result = await testProvider(upstream.url, upstream.key, true);
       if (result.success) {
-        console.log(`  ✅ 连接成功 (${result.latency}ms, ${result.modelCount} 个模型)\n`);
-        if (result.allModels.length > 0) {
-          result.allModels.forEach((model, i) => {
-            console.log(`    ${i + 1}. ${model}  (${upstream.name}/${model})`);
-          });
+        if (result.warning) {
+          console.log(`  ⚠️  连接成功 (${result.latency}ms)`);
+          console.log(`  ${result.warning.split('\n').join('\n  ')}\n`);
+        } else {
+          console.log(`  ✅ 连接成功 (${result.latency}ms, ${result.modelCount} 个模型)\n`);
+          if (result.allModels.length > 0) {
+            result.allModels.forEach((model, i) => {
+              console.log(`    ${i + 1}. ${model}  (${upstream.name}/${model})`);
+            });
+          }
         }
       } else {
         console.log(`  ❌ 连接失败: ${result.error}`);
@@ -449,11 +497,18 @@ async function cmdProviderAdd() {
     const result = await testProvider(url, key);
 
     if (result.success) {
-      console.log(`\n✅ 连接成功!`);
-      console.log(`   延迟: ${result.latency}ms`);
-      console.log(`   模型数量: ${result.modelCount}`);
-      if (result.models.length > 0) {
-        console.log(`   模型示例: ${result.models.join(', ')}`);
+      if (result.warning) {
+        // 连接成功但模型列表不可用
+        console.log(`\n⚠️  连接成功 (${result.latency}ms)`);
+        console.log(`   ${result.warning.split('\n').join('\n   ')}`);
+      } else {
+        // 完全成功
+        console.log(`\n✅ 连接成功!`);
+        console.log(`   延迟: ${result.latency}ms`);
+        console.log(`   模型数量: ${result.modelCount}`);
+        if (result.models.length > 0) {
+          console.log(`   模型示例: ${result.models.join(', ')}`);
+        }
       }
 
       // 询问是否保存
@@ -589,11 +644,16 @@ async function cmdProviderTest() {
       const result = await testProvider(upstream.url, upstream.key);
 
       if (result.success) {
-        console.log(`\n✅ 连接成功`);
-        console.log(`   延迟: ${result.latency}ms`);
-        console.log(`   模型数量: ${result.modelCount}`);
-        if (result.models.length > 0) {
-          console.log(`   模型示例: ${result.models.join(', ')}`);
+        if (result.warning) {
+          console.log(`\n⚠️  连接成功 (${result.latency}ms)`);
+          console.log(`   ${result.warning.split('\n').join('\n   ')}`);
+        } else {
+          console.log(`\n✅ 连接成功`);
+          console.log(`   延迟: ${result.latency}ms`);
+          console.log(`   模型数量: ${result.modelCount}`);
+          if (result.models.length > 0) {
+            console.log(`   模型示例: ${result.models.join(', ')}`);
+          }
         }
       } else {
         console.log(`\n❌ 连接失败`);
@@ -611,7 +671,11 @@ async function cmdProviderTest() {
         const result = await testProvider(u.url, u.key);
 
         if (result.success) {
-          console.log(`    ✅ 成功 (${result.latency}ms, ${result.modelCount} 个模型)`);
+          if (result.warning) {
+            console.log(`    ⚠️  成功 (${result.latency}ms) - 模型列表不可用`);
+          } else {
+            console.log(`    ✅ 成功 (${result.latency}ms, ${result.modelCount} 个模型)`);
+          }
         } else {
           console.log(`    ❌ 失败: ${result.error}`);
         }
