@@ -150,7 +150,54 @@ function recordLatency(idx, ms) {
 
 let runtimeStrategy = null; // null = 使用 cfg.upstreamStrategy
 
-function pickUpstream(cfg) {
+/**
+ * 解析模型名称，提取 provider 和实际模型名
+ * @param {string} modelName - 模型名称，可能包含 provider 前缀
+ * @param {Array} upstreams - upstream 列表
+ * @returns {{ model: string, upstream: object|null, idx: number }}
+ */
+function parseModelWithProvider(modelName, upstreams) {
+  if (!modelName) return { model: modelName, upstream: null, idx: -1 };
+
+  // 格式1: provider/model
+  const slashIdx = modelName.indexOf('/');
+  if (slashIdx > 0) {
+    const provider = modelName.slice(0, slashIdx);
+    const model = modelName.slice(slashIdx + 1);
+    const foundIdx = upstreams.findIndex(u =>
+      u.name.toLowerCase() === provider.toLowerCase()
+    );
+    if (foundIdx >= 0) {
+      return { model, upstream: upstreams[foundIdx], idx: foundIdx };
+    }
+  }
+
+  // 格式2: model@provider
+  const atIdx = modelName.lastIndexOf('@');
+  if (atIdx > 0 && atIdx < modelName.length - 1) {
+    const model = modelName.slice(0, atIdx);
+    const provider = modelName.slice(atIdx + 1);
+    const foundIdx = upstreams.findIndex(u =>
+      u.name.toLowerCase() === provider.toLowerCase()
+    );
+    if (foundIdx >= 0) {
+      return { model, upstream: upstreams[foundIdx], idx: foundIdx };
+    }
+  }
+
+  // 无 provider 前缀
+  return { model: modelName, upstream: null, idx: -1 };
+}
+
+function pickUpstream(cfg, options = {}) {
+  const { specifiedUpstream, specifiedIdx } = options;
+
+  // 优先级1: 模型名称指定了 provider
+  if (specifiedUpstream) {
+    return { upstream: specifiedUpstream, idx: specifiedIdx };
+  }
+
+  // 优先级2: 策略选择
   const strategy = runtimeStrategy || cfg.upstreamStrategy;
   if (strategy === 'roundrobin') return pickRoundRobin(cfg.upstreams);
   return pickFastest(cfg.upstreams);
@@ -671,7 +718,8 @@ async function handleUpstreamModels(cfg, res) {
 
   for (let i = 0; i < cfg.upstreams.length; i++) {
     const upstream = cfg.upstreams[i];
-    const upstreamName = upstream.url.includes('iflow') ? 'iFlow' : `upstream-${i + 1}`;
+    // 【修改】使用配置的 name
+    const upstreamName = upstream.name;
 
     try {
       const models = await new Promise((resolve, reject) => {
@@ -706,6 +754,8 @@ async function handleUpstreamModels(cfg, res) {
                   ...m,
                   upstream: upstreamName,
                   upstream_url: upstream.url,
+                  alias: `${upstreamName}/${m.id}`,
+                  alias_alt: `${m.id}@${upstreamName}`,
                 })));
               } else {
                 resolve([]);
@@ -775,6 +825,17 @@ async function handleOpenAICompletions(cfg, req, res) {
 
   const stream = !!bodyObj.stream;
   let model = (bodyObj.model || '').trim();
+
+  // 【新增】解析模型名称中的 provider
+  const { model: resolvedModel, upstream: specifiedUpstream, idx: specifiedIdx } =
+    parseModelWithProvider(model, cfg.upstreams);
+
+  if (resolvedModel !== model) {
+    model = resolvedModel;
+    bodyObj.model = model;
+    rawBody = Buffer.from(JSON.stringify(bodyObj));
+  }
+
   if (!model && cfg.defaultModel) {
     model = cfg.defaultModel;
     bodyObj.model = model;
@@ -795,7 +856,11 @@ async function handleOpenAICompletions(cfg, req, res) {
   }
 
   // 以下是原来的 HTTP 模式
-  const { upstream, idx } = pickUpstream(cfg);
+  // 【修改】传入指定的 upstream
+  const { upstream, idx } = pickUpstream(cfg, {
+    specifiedUpstream,
+    specifiedIdx
+  });
   const endpoint = upstream.url + '/chat/completions';
   const { sessionID, conversationID } = requestIDs(bodyObj);
   const traceParent = (req.headers['traceparent'] || '').trim();
@@ -1035,7 +1100,20 @@ async function handleAnthropicMessages(cfg, req, res) {
     writeAnthropicError(res, 400, err.message); return;
   }
 
-  const { upstream, idx } = pickUpstream(cfg);
+  // 【新增】解析模型名称中的 provider
+  const { model: resolvedModel, upstream: specifiedUpstream, idx: specifiedIdx } =
+    parseModelWithProvider(model, cfg.upstreams);
+
+  if (resolvedModel !== model) {
+    model = resolvedModel;
+    openAIBody.model = model;
+  }
+
+  // 【修改】传入指定的 upstream
+  const { upstream, idx } = pickUpstream(cfg, {
+    specifiedUpstream,
+    specifiedIdx
+  });
   const endpoint = upstream.url + '/chat/completions';
   const { sessionID, conversationID } = requestIDs(openAIBody);
   const traceParent = (req.headers['traceparent'] || '').trim();
@@ -1050,10 +1128,22 @@ async function handleAnthropicMessages(cfg, req, res) {
   // Apply multimodal bridge if enabled
   let openAIBodyBuffer = Buffer.from(JSON.stringify(openAIBody));
   try {
-    const ext = cfg.multimodal.extractorUpstream;
+    // 【修改】解析 extractorModel 中的 provider
+    const { model: extractorModel, upstream: extractorUpstream, idx: extractorIdx } =
+      parseModelWithProvider(cfg.multimodal.extractorModel, cfg.upstreams);
+
+    // 选择 extractor 的 upstream
+    const ext = extractorUpstream ||
+      cfg.upstreams.find(u => u.isIFlow) ||
+      cfg.upstreams[0];
     const extractorEndpoint = ext.url + '/chat/completions';
     const extractorOpts = { ...iflowOpts, withSignature: ext.sign };
-    openAIBodyBuffer = await maybeApplyMultimodalBridge(openAIBodyBuffer, cfg.multimodal, extractorEndpoint, ext.key, model, extractorOpts);
+
+    openAIBodyBuffer = await maybeApplyMultimodalBridge(
+      openAIBodyBuffer, cfg.multimodal, extractorEndpoint, ext.key,
+      extractorModel,  // 使用解析后的模型名
+      extractorOpts
+    );
   } catch (err) {
     console.warn('[multimodal] bridge error:', err.message);
   }

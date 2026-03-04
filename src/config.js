@@ -35,6 +35,26 @@ function getList(key, defaultValue) {
   return v.split(',').map(s => s.trim()).filter(Boolean);
 }
 
+// ─── iFlow 域名检测 ────────────────────────────────────────────────────────────
+
+/**
+ * 检测 URL 是否为 iFlow 官方域名
+ * @param {string} url - API URL
+ * @returns {boolean}
+ */
+function isIFlowDomain(url) {
+  if (!url) return false;
+  // iFlow 官方域名列表
+  const IFLOW_DOMAINS = [
+    'apis.iflow.cn',
+    'api.iflow.cn',
+    'iflow.cn',
+  ];
+  return IFLOW_DOMAINS.some(d =>
+    url.includes(`://${d}`) || url.includes(`://${d}:`) || url.includes(`.${d}`)
+  );
+}
+
 // ─── iFlow CLI OAuth 凭证读取 ──────────────────────────────────────────────────
 
 /**
@@ -253,12 +273,17 @@ function load() {
       // 支持显式配置签名：UPSTREAM_X_SIGN=true/false
       // 默认：启用签名（更安全，iFlow API 需要）
       const explicitSign = getEnv(`UPSTREAM_${i}_SIGN`, '');
+      // 【新增】支持自定义名称
+      const name = getEnv(`UPSTREAM_${i}_NAME`, '')
+        || (isIFlowDomain(url) ? 'iFlow' : `provider-${i}`);
+      // 【新增】支持显式指定是否为 iFlow：UPSTREAM_X_ISIFLOW=true/false
+      const explicitIsIFlow = getEnv(`UPSTREAM_${i}_ISIFLOW`, '');
       if (!url && !key) break;
       if (!url) throw new Error(`UPSTREAM_${i}_URL must be set`);
 
       // 如果 URL 包含 iflow 且 key 为空或 "auto"，使用 CLI 凭证
       let finalKey = key;
-      if (url.includes('iflow') && (!key || key.toLowerCase() === 'auto')) {
+      if (isIFlowDomain(url) && (!key || key.toLowerCase() === 'auto')) {
         finalKey = cliCreds.apiKey || '';
         if (!finalKey) {
           console.warn(`[config] UPSTREAM_${i}_KEY is auto but no iFlow CLI credentials found`);
@@ -266,28 +291,38 @@ function load() {
       }
 
       if (!finalKey) throw new Error(`UPSTREAM_${i}_KEY must be set`);
-      // 签名逻辑：显式配置优先，否则默认启用
-      const sign = explicitSign !== '' ? getBool(`UPSTREAM_${i}_SIGN`, true) : true;
-      numbered.push({ key: finalKey, url, sign, isIFlow: url.includes('iflow') });
+      // 签名逻辑：显式配置优先，否则 iFlow 域名默认启用
+      const sign = explicitSign !== '' ? getBool(`UPSTREAM_${i}_SIGN`, true) : isIFlowDomain(url);
+      // isIFlow 逻辑：显式配置优先，否则基于域名判断
+      const isIFlow = explicitIsIFlow !== '' ? getBool(`UPSTREAM_${i}_ISIFLOW`, false) : isIFlowDomain(url);
+      numbered.push({ key: finalKey, url, sign, isIFlow, name });
     }
     if (numbered.length > 0) return numbered;
 
     // 方式2：单行格式
     const raw = getEnv('UPSTREAMS', '');
     if (raw) {
-      return raw.split(',').map(s => s.trim()).filter(Boolean).map(entry => {
+      return raw.split(',').map(s => s.trim()).filter(Boolean).map((entry, idx) => {
         const sep = entry.indexOf('|');
         if (sep < 0) throw new Error(`UPSTREAMS entry missing '|' separator: ${entry}`);
         const key = entry.slice(0, sep).trim();
         const url = entry.slice(sep + 1).trim().replace(/\/$/, '');
         if (!key || !url) throw new Error(`UPSTREAMS entry invalid: ${entry}`);
-        // 默认启用签名
-        return { key, url, sign: true };
+        const isIFlow = isIFlowDomain(url);
+        const name = isIFlow ? 'iFlow' : `provider-${idx + 1}`;
+        return { key, url, sign: isIFlow, isIFlow, name };
       });
     }
 
     // 方式3：回退
-    return apiKeys.map(key => ({ key, url: baseURL, sign: enableSignature }));
+    const isIFlow = isIFlowDomain(baseURL);
+    return apiKeys.map((key, idx) => ({
+      key,
+      url: baseURL,
+      sign: enableSignature || isIFlow,
+      isIFlow,
+      name: isIFlow ? 'iFlow' : `provider-${idx + 1}`,
+    }));
   })();
 
   return {
@@ -318,8 +353,7 @@ function load() {
       passThroughModels: getList('MM_PASS_THROUGH_MODELS', ['qwen3-vl-*', '*vision*', '*vl*', 'tstars2.0']),
       schemaVersion: 'v1',
       temperature: 0,
-      // 视觉提取器专用 upstream：优先选 iFlow，保证 Qwen3-VL-Plus 可用
-      extractorUpstream: upstreams.find(u => u.url.includes('iflow')) || upstreams[0],
+      // 【已移除】extractorUpstream 字段，改为在 server.js 中动态解析 extractorModel 中的 provider 前缀
     },
     // ACP 模式配置（通过官方 iFlow CLI 通信，避免封号）
     acp: {

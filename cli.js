@@ -21,6 +21,19 @@ function getList(key, defaultValue) {
   return v.split(',').map(s => s.trim()).filter(Boolean);
 }
 
+// ─── iFlow 域名检测 ────────────────────────────────────────────────────────────
+
+/**
+ * 检测 URL 是否为 iFlow 官方域名
+ */
+function isIFlowDomain(url) {
+  if (!url) return false;
+  const IFLOW_DOMAINS = ['apis.iflow.cn', 'api.iflow.cn', 'iflow.cn'];
+  return IFLOW_DOMAINS.some(d =>
+    url.includes(`://${d}`) || url.includes(`://${d}:`) || url.includes(`.${d}`)
+  );
+}
+
 function loadConfig() {
   const port = parseInt(getEnv('PORT', '8327'), 10);
 
@@ -31,9 +44,9 @@ function loadConfig() {
     const key = getEnv(`UPSTREAM_${i}_KEY`, '');
     if (!url && !key) break;
     if (!url || !key) continue;
-    // 根据URL判断是否需要签名
-    const sign = url.includes('iflow') || url.includes('apis.iflow');
-    upstreams.push({ url, key, sign, name: url.includes('iflow') ? 'iFlow' : `provider-${i}` });
+    // 根据域名判断是否为 iFlow
+    const isIFlow = isIFlowDomain(url);
+    upstreams.push({ url, key, sign: isIFlow, name: getEnv(`UPSTREAM_${i}_NAME`, '') || (isIFlow ? 'iFlow' : `provider-${i}`) });
   }
 
   // 从 ~/.iflow/settings.json 加载
@@ -246,7 +259,36 @@ function getNextProviderNum() {
   return maxNum + 1;
 }
 
-function addProviderToEnv(url, key, sign) {
+/**
+ * 更新 .env 文件中的一行配置
+ * @param {string} key - 配置键名，如 UPSTREAM_1_NAME
+ * @param {string} value - 配置值
+ */
+function updateEnvLine(key, value) {
+  const envPath = path.join(process.cwd(), '.env');
+  let content = '';
+  if (fs.existsSync(envPath)) {
+    content = fs.readFileSync(envPath, 'utf-8');
+  }
+
+  const lines = content.split('\n');
+  let found = false;
+  const newLines = lines.map(line => {
+    if (line.startsWith(`${key}=`)) {
+      found = true;
+      return `${key}=${value}`;
+    }
+    return line;
+  });
+
+  if (!found) {
+    newLines.push(`${key}=${value}`);
+  }
+
+  fs.writeFileSync(envPath, newLines.join('\n'), 'utf-8');
+}
+
+function addProviderToEnv(url, key, sign, name) {
   const envPath = path.join(process.cwd(), '.env');
   let content = '';
   if (fs.existsSync(envPath)) {
@@ -254,17 +296,18 @@ function addProviderToEnv(url, key, sign) {
   }
 
   const num = getNextProviderNum();
-  const name = url.includes('iflow') ? 'iFlow' : `provider-${num}`;
+  const providerName = name || (url.includes('iflow') ? 'iFlow' : `provider-${num}`);
 
   const newContent = content +
     (content && !content.endsWith('\n') ? '\n' : '') +
-    `\n# Provider ${num}: ${name} (added ${new Date().toISOString().split('T')[0]})\n` +
+    `\n# Provider ${num}: ${providerName} (added ${new Date().toISOString().split('T')[0]})\n` +
     `UPSTREAM_${num}_URL=${url}\n` +
     `UPSTREAM_${num}_KEY=${key}\n` +
-    `UPSTREAM_${num}_SIGN=${sign}\n`;
+    `UPSTREAM_${num}_SIGN=${sign}\n` +
+    `UPSTREAM_${num}_NAME=${providerName}\n`;
 
   fs.writeFileSync(envPath, newContent, 'utf-8');
-  return { num, name };
+  return { num, name: providerName };
 }
 
 function removeProviderFromEnv(num) {
@@ -277,6 +320,7 @@ function removeProviderFromEnv(num) {
   const urlPattern = new RegExp(`^UPSTREAM_${num}_URL=`);
   const keyPattern = new RegExp(`^UPSTREAM_${num}_KEY=`);
   const signPattern = new RegExp(`^UPSTREAM_${num}_SIGN=`);
+  const namePattern = new RegExp(`^UPSTREAM_${num}_NAME=`);
 
   let found = false;
   const newLines = [];
@@ -288,7 +332,7 @@ function removeProviderFromEnv(num) {
       found = true;
       continue;
     }
-    if (line.match(urlPattern) || line.match(keyPattern) || line.match(signPattern)) {
+    if (line.match(urlPattern) || line.match(keyPattern) || line.match(signPattern) || line.match(namePattern)) {
       found = true;
       continue;
     }
@@ -381,7 +425,7 @@ async function cmdProviderAdd() {
     }
 
     // 判断是否是 iFlow
-    const isIFlow = url.includes('iflow') || url.includes('apis.iflow');
+    const isIFlow = isIFlowDomain(url);
     if (isIFlow) {
       console.log('✓ 检测到 iFlow API，将自动启用签名\n');
     }
@@ -574,6 +618,43 @@ async function cmdProviderTest() {
   }
 }
 
+async function cmdProviderName() {
+  const config = loadConfig();
+  if (config.upstreams.length === 0) {
+    console.log('❌ 没有配置任何 Provider');
+    console.log('运行 `node cli.js provider add` 添加 Provider');
+    return;
+  }
+
+  const rl = createReadline();
+  try {
+    console.log('已配置的 Provider:\n');
+    config.upstreams.forEach((u, i) => {
+      console.log(`  [${i + 1}] ${u.name} - ${u.url}`);
+    });
+
+    const numStr = await question(rl, '\n请输入要修改的 Provider 编号');
+    const num = parseInt(numStr, 10);
+    if (isNaN(num) || num < 1 || num > config.upstreams.length) {
+      console.log('❌ 无效的编号');
+      return;
+    }
+
+    const newName = await question(rl, '请输入新名称', config.upstreams[num - 1].name);
+    if (!newName.trim()) {
+      console.log('❌ 名称不能为空');
+      return;
+    }
+
+    // 更新 .env 添加 UPSTREAM_X_NAME
+    updateEnvLine(`UPSTREAM_${num}_NAME`, newName.trim());
+    console.log(`\n✅ Provider ${num} 名称已设置为: ${newName.trim()}`);
+    console.log('重启 iflow-relay 使配置生效: npm start');
+  } finally {
+    rl.close();
+  }
+}
+
 async function cmdModel() {
   const config = loadConfig();
 
@@ -615,6 +696,8 @@ async function cmdModel() {
                     id: m.id,
                     owned_by: m.owned_by || 'unknown',
                     upstream: upstream.name,
+                    alias: `${upstream.name}/${m.id}`,
+                    alias_alt: `${m.id}@${upstream.name}`,
                   });
                 }
               });
@@ -629,69 +712,67 @@ async function cmdModel() {
       return;
     }
 
-    // 显示模型列表
+    // 按来源分组显示
+    const byUpstream = {};
+    for (const m of allModels) {
+      const key = m.upstream || 'unknown';
+      if (!byUpstream[key]) byUpstream[key] = [];
+      byUpstream[key].push(m);
+    }
+
     console.log(`可用模型 (${allModels.length} 个):\n`);
-    const pageSize = 20;
-    let page = 0;
-
-    while (true) {
-      const start = page * pageSize;
-      const end = Math.min(start + pageSize, allModels.length);
-      const pageModels = allModels.slice(start, end);
-
-      pageModels.forEach((m, i) => {
+    let idx = 1;
+    for (const [upstream, models] of Object.entries(byUpstream)) {
+      console.log(`[${upstream}]`);
+      for (const m of models) {
         const current = m.id === config.defaultModel ? ' ← 当前' : '';
-        console.log(`  ${start + i + 1}. ${m.id}${current}`);
-      });
+        console.log(`  ${idx}. ${m.id}${current}`);
+        console.log(`     别名: ${m.alias} 或 ${m.alias_alt}`);
+        idx++;
+      }
+      console.log('');
+    }
 
-      console.log(`\n第 ${page + 1} / ${Math.ceil(allModels.length / pageSize)} 页`);
+    const total = allModels.length;
+    console.log(`共 ${total} 个模型\n`);
 
-      const action = await question(rl, '\n输入序号选择模型, n=下一页, p=上一页, q=退出');
+    const action = await question(rl, '输入序号选择模型, q=退出');
+    if (action === 'q' || action === '') {
+      return;
+    }
 
-      if (action === 'q' || action === '') {
-        break;
-      } else if (action === 'n' && end < allModels.length) {
-        page++;
-        console.log('');
-      } else if (action === 'p' && page > 0) {
-        page--;
-        console.log('');
-      } else {
-        const num = parseInt(action, 10);
-        if (num >= 1 && num <= allModels.length) {
-          const model = allModels[num - 1];
-          const confirm = await questionYesNo(rl, `\n设置默认模型为 ${model.id}?`);
+    const num = parseInt(action, 10);
+    if (num >= 1 && num <= allModels.length) {
+      const model = allModels[num - 1];
+      const confirm = await questionYesNo(rl, `\n设置默认模型为 ${model.id}?`);
 
-          if (confirm) {
-            // 更新 .env
-            const envPath = path.join(process.cwd(), '.env');
-            let content = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
+      if (confirm) {
+        // 更新 .env
+        const envPath = path.join(process.cwd(), '.env');
+        let content = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
 
-            const lines = content.split('\n');
-            let foundDefault = false;
-            let foundModels = false;
-            const newLines = lines.map(line => {
-              if (line.startsWith('DEFAULT_MODEL=')) {
-                foundDefault = true;
-                return `DEFAULT_MODEL=${model.id}`;
-              }
-              if (line.startsWith('IFLOW_MODELS=')) {
-                foundModels = true;
-                return `IFLOW_MODELS=${model.id}`;
-              }
-              return line;
-            });
-
-            if (!foundDefault) newLines.push(`DEFAULT_MODEL=${model.id}`);
-            if (!foundModels) newLines.push(`IFLOW_MODELS=${model.id}`);
-
-            fs.writeFileSync(envPath, newLines.join('\n'), 'utf-8');
-
-            console.log(`\n✅ 默认模型已设置为: ${model.id}`);
-            console.log('重启 iflow-relay 使配置生效: npm start');
-            break;
+        const lines = content.split('\n');
+        let foundDefault = false;
+        let foundModels = false;
+        const newLines = lines.map(line => {
+          if (line.startsWith('DEFAULT_MODEL=')) {
+            foundDefault = true;
+            return `DEFAULT_MODEL=${model.id}`;
           }
-        }
+          if (line.startsWith('IFLOW_MODELS=')) {
+            foundModels = true;
+            return `IFLOW_MODELS=${model.id}`;
+          }
+          return line;
+        });
+
+        if (!foundDefault) newLines.push(`DEFAULT_MODEL=${model.id}`);
+        if (!foundModels) newLines.push(`IFLOW_MODELS=${model.id}`);
+
+        fs.writeFileSync(envPath, newLines.join('\n'), 'utf-8');
+
+        console.log(`\n✅ 默认模型已设置为: ${model.id}`);
+        console.log('重启 iflow-relay 使配置生效: npm start');
       }
     }
   } finally {
@@ -734,19 +815,25 @@ iflow-relay CLI - 管理 iflow-relay 代理
   node cli.js <command> [args]
 
 命令:
-  models              列出所有可用模型
-  model               交互式选择默认模型
-  provider list       列出已配置的 Provider
-  provider add        交互式添加 Provider
-  provider remove     删除 Provider
-  provider test       测试 Provider 连接
-  health              检查服务状态
+  models                      列出所有可用模型（含来源和别名）
+  model                       交互式选择默认模型
+  provider list               列出已配置的 Provider
+  provider add                交互式添加 Provider
+  provider remove             删除 Provider
+  provider test               测试 Provider 连接
+  provider name               设置 Provider 名称
+  health                      检查服务状态
+
+模型别名格式:
+  provider/model    例如: iFlow/qwen3-max
+  model@provider    例如: qwen3-max@iFlow
 
 示例:
   node cli.js models
   node cli.js model
   node cli.js provider add
   node cli.js provider test
+  node cli.js provider name
   node cli.js health
 
 全局安装:
@@ -778,8 +865,10 @@ async function main() {
         await cmdProviderRemove();
       } else if (subCmd === 'test') {
         await cmdProviderTest();
+      } else if (subCmd === 'name') {
+        await cmdProviderName();
       } else {
-        console.log('用法: node cli.js provider <list|add|remove|test>');
+        console.log('用法: node cli.js provider <list|add|remove|test|name>');
       }
       break;
     case 'health':
