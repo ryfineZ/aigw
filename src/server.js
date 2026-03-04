@@ -504,6 +504,99 @@ function handleModels(cfg, req, res) {
   res.end(JSON.stringify({ object: 'list', data }));
 }
 
+/**
+ * 从上游获取可用模型列表
+ * @param {object} cfg - 配置
+ * @param {http.ServerResponse} res - 响应对象
+ */
+async function handleUpstreamModels(cfg, res) {
+  const https = require('https');
+  const http = require('http');
+  const { URL } = require('url');
+
+  // 收集所有上游的模型
+  const allModels = [];
+  const errors = [];
+
+  for (let i = 0; i < cfg.upstreams.length; i++) {
+    const upstream = cfg.upstreams[i];
+    const upstreamName = upstream.url.includes('iflow') ? 'iFlow' : `upstream-${i + 1}`;
+
+    try {
+      const models = await new Promise((resolve, reject) => {
+        const url = new URL(upstream.url + '/models');
+        const isHttps = url.protocol === 'https:';
+        const lib = isHttps ? https : http;
+
+        const headers = {
+          'authorization': `Bearer ${upstream.key}`,
+          'user-agent': 'iFlow-Cli',
+          'accept': '*/*',
+        };
+
+        const req = lib.request({
+          hostname: url.hostname,
+          port: url.port || (isHttps ? 443 : 80),
+          path: url.pathname,
+          method: 'GET',
+          headers,
+          agent: isHttps ? new https.Agent({
+            keepAlive: true,
+            ALPNProtocols: ['http/1.1'],
+          }) : undefined,
+        }, (upstreamRes) => {
+          let data = '';
+          upstreamRes.on('data', chunk => data += chunk);
+          upstreamRes.on('end', () => {
+            try {
+              const json = JSON.parse(data);
+              if (json.data && Array.isArray(json.data)) {
+                resolve(json.data.map(m => ({
+                  ...m,
+                  upstream: upstreamName,
+                  upstream_url: upstream.url,
+                })));
+              } else {
+                resolve([]);
+              }
+            } catch (e) {
+              resolve([]);
+            }
+          });
+        });
+
+        req.on('error', reject);
+        req.setTimeout(10000, () => {
+          req.destroy();
+          reject(new Error('timeout'));
+        });
+        req.end();
+      });
+
+      allModels.push(...models);
+    } catch (err) {
+      errors.push({ upstream: upstreamName, error: err.message });
+    }
+  }
+
+  // 去重（相同 id 的模型保留第一个出现的）
+  const seen = new Set();
+  const uniqueModels = allModels.filter(m => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
+
+  res.setHeader('Content-Type', 'application/json');
+  res.writeHead(200);
+  res.end(JSON.stringify({
+    object: 'list',
+    data: uniqueModels,
+    errors: errors.length > 0 ? errors : undefined,
+    total: uniqueModels.length,
+  }, null, 2));
+}
+
 function handleModelByID(cfg, req, res, id) {
   if (req.method !== 'GET') { res.writeHead(405); res.end(); return; }
   id = (id || '').trim();
@@ -898,6 +991,7 @@ function createHandler(cfg) {
       if (url === '/health') return handleHealth(req, res);
       if (url === '/health/acp') return await handleAcpHealth(cfg, req, res);
       if (url === '/v1/models' || url === '/models') return handleModels(cfg, req, res);
+      if (url === '/v1/upstream/models' || url === '/upstream/models') return await handleUpstreamModels(cfg, res);
       if (url.startsWith('/v1/models/')) return handleModelByID(cfg, req, res, url.slice('/v1/models/'.length));
       if (url.startsWith('/models/')) return handleModelByID(cfg, req, res, url.slice('/models/'.length));
       if (url === '/admin/upstream-strategy') return handleAdminStrategy(cfg, req, res);
