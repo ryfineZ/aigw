@@ -327,6 +327,7 @@ async function getAcpClient(cfg) {
  * 检查是否应该使用 ACP 模式
  * @param {object} cfg - 配置
  * @returns {Promise<boolean>}
+ * @throws {Error} 如果 ACP 启用但 iFlow CLI 不可用
  */
 async function shouldUseAcp(cfg) {
   if (!cfg.acp.enabled) return false;
@@ -334,8 +335,7 @@ async function shouldUseAcp(cfg) {
   // 检测 iFlow CLI 是否运行
   const available = await detectAcpServer(cfg.acp.port, 2000);
   if (!available) {
-    console.log('[acp] iFlow CLI not detected on port', cfg.acp.port);
-    return false;
+    throw new Error(`ACP mode enabled but iFlow CLI not running on port ${cfg.acp.port}. Start with: iflow --experimental-acp --port ${cfg.acp.port}`);
   }
 
   return true;
@@ -539,9 +539,15 @@ async function handleOpenAICompletions(cfg, req, res) {
   if (!model) { writeError(res, 400, 'model is required'); return; }
 
   // 检查是否使用 ACP 模式
-  if (await shouldUseAcp(cfg)) {
-    console.log('[server] using ACP mode (via iFlow CLI)');
-    return handleOpenAICompletionsViaAcp(cfg, bodyObj, stream, res);
+  try {
+    if (await shouldUseAcp(cfg)) {
+      console.log('[server] using ACP mode (via iFlow CLI)');
+      return handleOpenAICompletionsViaAcp(cfg, bodyObj, stream, res);
+    }
+  } catch (err) {
+    // ACP 启用但 iFlow CLI 不可用，返回错误
+    writeError(res, 503, err.message);
+    return;
   }
 
   // 以下是原来的 HTTP 模式
