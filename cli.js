@@ -375,8 +375,7 @@ async function cmdModels() {
         console.log(`  ✅ 连接成功 (${result.latency}ms, ${result.modelCount} 个模型)\n`);
         if (result.allModels.length > 0) {
           result.allModels.forEach((model, i) => {
-            console.log(`    ${i + 1}. ${model}`);
-            console.log(`       别名: ${upstream.name}/${model} 或 ${model}@${upstream.name}`);
+            console.log(`    ${i + 1}. ${model}  (${upstream.name}/${model})`);
           });
         }
       } else {
@@ -394,7 +393,7 @@ async function cmdProviderList() {
 
   if (config.upstreams.length === 0) {
     console.log('❌ 没有配置任何 Provider');
-    console.log('运行 `node cli.js provider add` 添加 Provider');
+    console.log('运行 `iflow-relay provider add` 添加 Provider');
     return;
   }
 
@@ -628,7 +627,7 @@ async function cmdProviderName() {
   const config = loadConfig();
   if (config.upstreams.length === 0) {
     console.log('❌ 没有配置任何 Provider');
-    console.log('运行 `node cli.js provider add` 添加 Provider');
+    console.log('运行 `iflow-relay provider add` 添加 Provider');
     return;
   }
 
@@ -670,7 +669,7 @@ async function cmdModel() {
 
   if (config.upstreams.length === 0) {
     console.log('\n❌ 没有配置任何 Provider');
-    console.log('运行 `node cli.js provider add` 添加 Provider');
+    console.log('运行 `iflow-relay provider add` 添加 Provider');
     return;
   }
 
@@ -703,7 +702,6 @@ async function cmdModel() {
                     owned_by: m.owned_by || 'unknown',
                     upstream: upstream.name,
                     alias: `${upstream.name}/${m.id}`,
-                    alias_alt: `${m.id}@${upstream.name}`,
                   });
                 }
               });
@@ -732,8 +730,7 @@ async function cmdModel() {
       console.log(`[${upstream}]`);
       for (const m of models) {
         const current = m.id === config.defaultModel ? ' ← 当前' : '';
-        console.log(`  ${idx}. ${m.id}${current}`);
-        console.log(`     别名: ${m.alias} 或 ${m.alias_alt}`);
+        console.log(`  ${idx}. ${m.id}  (${m.alias})${current}`);
         idx++;
       }
       console.log('');
@@ -818,7 +815,7 @@ function printHelp() {
 iflow-relay CLI - 管理 iflow-relay 代理
 
 用法:
-  node cli.js <command> [args]
+  iflow-relay <command> [args]
 
 命令:
   models                      列出所有可用模型（含来源和别名）
@@ -832,19 +829,14 @@ iflow-relay CLI - 管理 iflow-relay 代理
 
 模型别名格式:
   provider/model    例如: iFlow/qwen3-max
-  model@provider    例如: qwen3-max@iFlow
 
 示例:
-  node cli.js models
-  node cli.js model
-  node cli.js provider add
-  node cli.js provider test
-  node cli.js provider name
-  node cli.js health
-
-全局安装:
-  npm link
   iflow-relay models
+  iflow-relay model
+  iflow-relay provider add
+  iflow-relay provider test
+  iflow-relay provider name
+  iflow-relay health
 `);
 }
 
@@ -874,7 +866,7 @@ async function main() {
       } else if (subCmd === 'name') {
         await cmdProviderName();
       } else {
-        console.log('用法: node cli.js provider <list|add|remove|test|name>');
+        console.log('用法: iflow-relay provider <list|add|remove|test|name>');
       }
       break;
     case 'health':

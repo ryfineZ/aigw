@@ -159,24 +159,11 @@ let runtimeStrategy = null; // null = 使用 cfg.upstreamStrategy
 function parseModelWithProvider(modelName, upstreams) {
   if (!modelName) return { model: modelName, upstream: null, idx: -1 };
 
-  // 格式1: provider/model
+  // 格式: provider/model
   const slashIdx = modelName.indexOf('/');
   if (slashIdx > 0) {
     const provider = modelName.slice(0, slashIdx);
     const model = modelName.slice(slashIdx + 1);
-    const foundIdx = upstreams.findIndex(u =>
-      u.name.toLowerCase() === provider.toLowerCase()
-    );
-    if (foundIdx >= 0) {
-      return { model, upstream: upstreams[foundIdx], idx: foundIdx };
-    }
-  }
-
-  // 格式2: model@provider
-  const atIdx = modelName.lastIndexOf('@');
-  if (atIdx > 0 && atIdx < modelName.length - 1) {
-    const model = modelName.slice(0, atIdx);
-    const provider = modelName.slice(atIdx + 1);
     const foundIdx = upstreams.findIndex(u =>
       u.name.toLowerCase() === provider.toLowerCase()
     );
@@ -755,7 +742,6 @@ async function handleUpstreamModels(cfg, res) {
                   upstream: upstreamName,
                   upstream_url: upstream.url,
                   alias: `${upstreamName}/${m.id}`,
-                  alias_alt: `${m.id}@${upstreamName}`,
                 })));
               } else {
                 resolve([]);
