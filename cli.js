@@ -34,6 +34,26 @@ function isIFlowDomain(url) {
   );
 }
 
+/**
+ * 从 URL 提取域名作为 Provider 名称
+ */
+function extractDomainName(url) {
+  try {
+    const parsed = new URL(url);
+    // 移除端口号
+    let hostname = parsed.hostname;
+    // 提取主域名（如 aigw-gzgy2.cucloud.cn → cucloud）
+    const parts = hostname.split('.');
+    if (parts.length >= 2) {
+      // 取倒数第二部分作为名称
+      return parts[parts.length - 2];
+    }
+    return hostname;
+  } catch (e) {
+    return 'provider';
+  }
+}
+
 function loadConfig() {
   const port = parseInt(getEnv('PORT', '8327'), 10);
 
@@ -575,8 +595,8 @@ async function cmdProviderAdd() {
       // 询问是否保存
       const save = await questionYesNo(rl, '\n是否保存此 Provider?', 'y');
       if (save) {
-        // 询问 Provider 名称
-        const defaultName = isIFlow ? 'iFlow' : `provider-${getNextProviderNum()}`;
+        // 询问 Provider 名称（默认从 URL 域名提取）
+        const defaultName = isIFlow ? 'iFlow' : extractDomainName(url);
         const inputName = await question(rl, 'Provider 名称', defaultName);
         const providerName = inputName.trim() || defaultName;
 
@@ -610,8 +630,8 @@ async function cmdProviderAdd() {
           await cmdProviderAdd();
           return;
         } else if (choice === '2') {
-          // 询问 Provider 名称
-          const defaultName = isIFlow ? 'iFlow' : `provider-${getNextProviderNum()}`;
+          // 询问 Provider 名称（默认从 URL 域名提取）
+          const defaultName = isIFlow ? 'iFlow' : extractDomainName(url);
           const inputName = await question(rl, 'Provider 名称', defaultName);
           const providerName = inputName.trim() || defaultName;
 
