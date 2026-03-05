@@ -46,7 +46,9 @@ function loadConfig() {
     if (!url || !key) continue;
     // 根据域名判断是否为 iFlow
     const isIFlow = isIFlowDomain(url);
-    upstreams.push({ url, key, sign: isIFlow, name: getEnv(`UPSTREAM_${i}_NAME`, '') || (isIFlow ? 'iFlow' : `provider-${i}`) });
+    const name = getEnv(`UPSTREAM_${i}_NAME`, '') || (isIFlow ? 'iFlow' : `provider-${i}`);
+    const models = getList(`UPSTREAM_${i}_MODELS`, []);
+    upstreams.push({ url, key, sign: isIFlow, name, models });
   }
 
   // 从 ~/.iflow/settings.json 加载
@@ -358,16 +360,13 @@ function addProviderToEnv(url, key, sign, name, models = null) {
     `UPSTREAM_${num}_SIGN=${sign}\n` +
     `UPSTREAM_${num}_NAME=${providerName}\n`;
 
-  // 如果提供了模型列表，写入 DEFAULT_MODEL 和 IFLOW_MODELS
+  // 如果提供了模型列表，写入 UPSTREAM_X_MODELS
   if (models && models.length > 0) {
     const modelList = Array.isArray(models) ? models : [models];
-    // 检查是否已有 DEFAULT_MODEL
+    newContent += `UPSTREAM_${num}_MODELS=${modelList.join(',')}\n`;
+    // 第一个模型作为默认模型
     if (!content.includes('DEFAULT_MODEL=')) {
       newContent += `DEFAULT_MODEL=${modelList[0]}\n`;
-    }
-    // 检查是否已有 IFLOW_MODELS
-    if (!content.includes('IFLOW_MODELS=')) {
-      newContent += `IFLOW_MODELS=${modelList.join(',')}\n`;
     }
   }
 
@@ -386,6 +385,7 @@ function removeProviderFromEnv(num) {
   const keyPattern = new RegExp(`^UPSTREAM_${num}_KEY=`);
   const signPattern = new RegExp(`^UPSTREAM_${num}_SIGN=`);
   const namePattern = new RegExp(`^UPSTREAM_${num}_NAME=`);
+  const modelsPattern = new RegExp(`^UPSTREAM_${num}_MODELS=`);
 
   let found = false;
   const newLines = [];
@@ -397,7 +397,7 @@ function removeProviderFromEnv(num) {
       found = true;
       continue;
     }
-    if (line.match(urlPattern) || line.match(keyPattern) || line.match(signPattern) || line.match(namePattern)) {
+    if (line.match(urlPattern) || line.match(keyPattern) || line.match(signPattern) || line.match(namePattern) || line.match(modelsPattern)) {
       found = true;
       continue;
     }
@@ -435,8 +435,17 @@ async function cmdModels() {
       const result = await testProvider(upstream.url, upstream.key, true);
       if (result.success) {
         if (result.warning) {
+          // API 无法获取模型，显示配置的模型列表
           console.log(`  ⚠️  连接成功 (${result.latency}ms)`);
-          console.log(`  ${result.warning.split('\n').join('\n  ')}\n`);
+          console.log(`  ${result.warning.split('\n').join('\n  ')}`);
+          if (upstream.models && upstream.models.length > 0) {
+            console.log(`  配置的模型 (${upstream.models.length} 个):\n`);
+            upstream.models.forEach((model, i) => {
+              console.log(`    ${i + 1}. ${model}  (${upstream.name}/${model})`);
+            });
+          } else {
+            console.log(`  提示: 使用 iflow-relay provider models 命令配置模型列表`);
+          }
         } else {
           console.log(`  ✅ 连接成功 (${result.latency}ms, ${result.modelCount} 个模型)\n`);
           if (result.allModels.length > 0) {
@@ -447,9 +456,23 @@ async function cmdModels() {
         }
       } else {
         console.log(`  ❌ 连接失败: ${result.error}`);
+        // 显示配置的模型列表
+        if (upstream.models && upstream.models.length > 0) {
+          console.log(`  配置的模型 (${upstream.models.length} 个):`);
+          upstream.models.forEach((model, i) => {
+            console.log(`    ${i + 1}. ${model}  (${upstream.name}/${model})`);
+          });
+        }
       }
     } catch (err) {
       console.log(`  ❌ 连接失败: ${err.message}`);
+      // 显示配置的模型列表
+      if (upstream.models && upstream.models.length > 0) {
+        console.log(`  配置的模型 (${upstream.models.length} 个):`);
+        upstream.models.forEach((model, i) => {
+          console.log(`    ${i + 1}. ${model}  (${upstream.name}/${model})`);
+        });
+      }
     }
     console.log('');
   }

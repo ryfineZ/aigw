@@ -760,9 +760,40 @@ async function handleUpstreamModels(cfg, res) {
         req.end();
       });
 
-      allModels.push(...models);
+      // 如果 API 返回了模型，使用它们
+      if (models.length > 0) {
+        allModels.push(...models);
+      } else if (upstream.models && upstream.models.length > 0) {
+        // API 没有返回模型，使用配置的模型列表
+        for (const modelId of upstream.models) {
+          allModels.push({
+            id: modelId,
+            object: 'model',
+            created: 0,
+            owned_by: upstreamName,
+            upstream: upstreamName,
+            upstream_url: upstream.url,
+            alias: `${upstreamName}/${modelId}`,
+          });
+        }
+      }
     } catch (err) {
-      errors.push({ upstream: upstreamName, error: err.message });
+      // API 请求失败，尝试使用配置的模型列表
+      if (upstream.models && upstream.models.length > 0) {
+        for (const modelId of upstream.models) {
+          allModels.push({
+            id: modelId,
+            object: 'model',
+            created: 0,
+            owned_by: upstreamName,
+            upstream: upstreamName,
+            upstream_url: upstream.url,
+            alias: `${upstreamName}/${modelId}`,
+          });
+        }
+      } else {
+        errors.push({ upstream: upstreamName, error: err.message });
+      }
     }
   }
 

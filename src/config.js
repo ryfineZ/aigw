@@ -278,6 +278,8 @@ function load() {
         || (isIFlowDomain(url) ? 'iFlow' : `provider-${i}`);
       // 【新增】支持显式指定是否为 iFlow：UPSTREAM_X_ISIFLOW=true/false
       const explicitIsIFlow = getEnv(`UPSTREAM_${i}_ISIFLOW`, '');
+      // 【新增】支持配置模型列表：UPSTREAM_X_MODELS=model1,model2
+      const models = getList(`UPSTREAM_${i}_MODELS`, []);
       if (!url && !key) break;
       if (!url) throw new Error(`UPSTREAM_${i}_URL must be set`);
 
@@ -295,7 +297,7 @@ function load() {
       const sign = explicitSign !== '' ? getBool(`UPSTREAM_${i}_SIGN`, true) : isIFlowDomain(url);
       // isIFlow 逻辑：显式配置优先，否则基于域名判断
       const isIFlow = explicitIsIFlow !== '' ? getBool(`UPSTREAM_${i}_ISIFLOW`, false) : isIFlowDomain(url);
-      numbered.push({ key: finalKey, url, sign, isIFlow, name });
+      numbered.push({ key: finalKey, url, sign, isIFlow, name, models });
     }
     if (numbered.length > 0) return numbered;
 
@@ -310,7 +312,7 @@ function load() {
         if (!key || !url) throw new Error(`UPSTREAMS entry invalid: ${entry}`);
         const isIFlow = isIFlowDomain(url);
         const name = isIFlow ? 'iFlow' : `provider-${idx + 1}`;
-        return { key, url, sign: isIFlow, isIFlow, name };
+        return { key, url, sign: isIFlow, isIFlow, name, models: [] };
       });
     }
 
@@ -322,6 +324,7 @@ function load() {
       sign: enableSignature || isIFlow,
       isIFlow,
       name: isIFlow ? 'iFlow' : `provider-${idx + 1}`,
+      models: [],
     }));
   })();
 
