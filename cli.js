@@ -1069,6 +1069,78 @@ UPSTREAM_${num}_NAME=iFlow
   }
 }
 
+async function cmdProviderClear() {
+  // 读取所有 Provider
+  const allProviders = [];
+  const envPath = path.join(process.cwd(), '.env');
+  if (fs.existsSync(envPath)) {
+    const content = fs.readFileSync(envPath, 'utf-8');
+    for (let i = 1; i <= 50; i++) {
+      const urlMatch = content.match(new RegExp(`^UPSTREAM_${i}_URL=(.+)$`, 'm'));
+      if (urlMatch) {
+        const url = urlMatch[1].trim().replace(/\/$/, '');
+        const nameMatch = content.match(new RegExp(`^UPSTREAM_${i}_NAME=(.+)$`, 'm'));
+        const name = nameMatch ? nameMatch[1].trim() : (isIFlowDomain(url) ? 'iFlow' : `provider-${i}`);
+        allProviders.push({ index: i, name, url });
+      }
+    }
+  }
+
+  if (allProviders.length === 0) {
+    console.log('❌ 没有配置任何 Provider');
+    return;
+  }
+
+  console.log('已配置的 Provider:\n');
+  allProviders.forEach((p, i) => {
+    console.log(`  [${i + 1}] ${p.name} - ${p.url}`);
+  });
+  console.log('');
+
+  const rl = createReadline();
+  try {
+    const confirm = await questionYesNo(rl, `确认清空所有 ${allProviders.length} 个 Provider?`);
+    if (!confirm) {
+      console.log('已取消');
+      return;
+    }
+
+    // 删除所有 Provider 相关配置
+    const content = fs.readFileSync(envPath, 'utf-8');
+    const lines = content.split('\n');
+    const newLines = [];
+    let skipNextEmpty = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // 跳过 Provider 注释行
+      if (line.match(/^# Provider \d+:/)) {
+        skipNextEmpty = true;
+        continue;
+      }
+      // 跳过 UPSTREAM_X_* 配置行
+      if (line.match(/^UPSTREAM_\d+_/)) {
+        continue;
+      }
+      // 跳过注释后的空行
+      if (skipNextEmpty && line.trim() === '') {
+        skipNextEmpty = false;
+        continue;
+      }
+      newLines.push(line);
+    }
+
+    // 清理末尾多余空行
+    let result = newLines.join('\n').trimEnd() + '\n';
+    fs.writeFileSync(envPath, result, 'utf-8');
+
+    console.log(`\n✅ 已清空 ${allProviders.length} 个 Provider`);
+    console.log('重启 iflow-relay 使配置生效: npm start');
+  } finally {
+    rl.close();
+  }
+}
+
 async function cmdModel() {
   const config = loadConfig();
 
@@ -1353,6 +1425,7 @@ iflow-relay CLI - 管理 iflow-relay 代理
   provider add                交互式添加 Provider
   provider add-iflow          从 iFlow CLI 添加 iFlow Provider
   provider remove             删除 Provider
+  provider clear              清空所有 Provider
   provider test               测试 Provider 连接
   provider name               设置 Provider 名称
   provider disable            停用 Provider
@@ -1373,8 +1446,8 @@ iflow-relay CLI - 管理 iflow-relay 代理
   iflow-relay models
   iflow-relay provider add
   iflow-relay provider add-iflow
+  iflow-relay provider clear
   iflow-relay config set DEFAULT_MODEL iFlow/qwen3-max
-  iflow-relay config list
 `);
 }
 
@@ -1401,6 +1474,8 @@ async function main() {
         await cmdProviderAddIFlow();
       } else if (subCmd === 'remove' || subCmd === 'rm') {
         await cmdProviderRemove();
+      } else if (subCmd === 'clear') {
+        await cmdProviderClear();
       } else if (subCmd === 'test') {
         await cmdProviderTest();
       } else if (subCmd === 'name') {
@@ -1410,7 +1485,7 @@ async function main() {
       } else if (subCmd === 'enable') {
         await cmdProviderEnable();
       } else {
-        console.log('用法: iflow-relay provider <list|add|add-iflow|remove|test|name|disable|enable>');
+        console.log('用法: iflow-relay provider <list|add|add-iflow|remove|clear|test|name|disable|enable>');
       }
       break;
     case 'config':
