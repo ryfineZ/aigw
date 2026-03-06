@@ -337,6 +337,8 @@ function load() {
       const explicitIsIFlow = getEnv(`UPSTREAM_${i}_ISIFLOW`, '');
       // 【新增】支持配置模型列表：UPSTREAM_X_MODELS=model1,model2
       const models = getList(`UPSTREAM_${i}_MODELS`, []);
+      // 【新增】支持启用/停用：UPSTREAM_X_ENABLED=true/false
+      const enabled = getBool(`UPSTREAM_${i}_ENABLED`, true);
       if (!url && !key) break;
       if (!url) throw new Error(`UPSTREAM_${i}_URL must be set`);
 
@@ -354,9 +356,15 @@ function load() {
       const sign = explicitSign !== '' ? getBool(`UPSTREAM_${i}_SIGN`, true) : isIFlowDomain(url);
       // isIFlow 逻辑：显式配置优先，否则基于域名判断
       const isIFlow = explicitIsIFlow !== '' ? getBool(`UPSTREAM_${i}_ISIFLOW`, false) : isIFlowDomain(url);
-      numbered.push({ key: finalKey, url, sign, isIFlow, name, models });
+      numbered.push({ key: finalKey, url, sign, isIFlow, name, models, enabled });
     }
-    if (numbered.length > 0) return numbered;
+    // 只返回启用的 upstream
+    const enabledOnes = numbered.filter(u => u.enabled);
+    if (enabledOnes.length < numbered.length) {
+      const disabled = numbered.filter(u => !u.enabled).map(u => u.name).join(', ');
+      console.log(`[config] Disabled providers: ${disabled}`);
+    }
+    return enabledOnes;
 
     // 方式2：单行格式
     const raw = getEnv('UPSTREAMS', '');

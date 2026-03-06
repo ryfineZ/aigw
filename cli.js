@@ -8,6 +8,26 @@ const path = require('path');
 const os = require('os');
 const readline = require('readline');
 
+// 加载 .env 文件
+const envPath = path.join(process.cwd(), '.env');
+if (fs.existsSync(envPath)) {
+  const content = fs.readFileSync(envPath, 'utf-8');
+  content.split('\n').forEach(line => {
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith('#')) {
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx > 0) {
+        const key = trimmed.slice(0, eqIdx).trim();
+        const value = trimmed.slice(eqIdx + 1).trim();
+        // 只设置未定义的环境变量
+        if (process.env[key] === undefined) {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
+}
+
 // ─── 配置加载 ────────────────────────────────────────────────────────────────
 
 function getEnv(key, defaultValue) {
@@ -62,13 +82,14 @@ function loadConfig() {
   for (let i = 1; i <= 50; i++) {
     const url = getEnv(`UPSTREAM_${i}_URL`, '').replace(/\/$/, '');
     const key = getEnv(`UPSTREAM_${i}_KEY`, '');
+    const enabled = getEnv(`UPSTREAM_${i}_ENABLED`, 'true').toLowerCase() !== 'false';
     if (!url && !key) break;
     if (!url || !key) continue;
     // 根据域名判断是否为 iFlow
     const isIFlow = isIFlowDomain(url);
     const name = getEnv(`UPSTREAM_${i}_NAME`, '') || (isIFlow ? 'iFlow' : `provider-${i}`);
     const models = getList(`UPSTREAM_${i}_MODELS`, []);
-    upstreams.push({ url, key, sign: isIFlow, name, models });
+    upstreams.push({ url, key, sign: isIFlow, name, models, enabled, index: i });
   }
 
   // 从 ~/.iflow/settings.json 加载
@@ -499,22 +520,50 @@ async function cmdModels() {
 }
 
 async function cmdProviderList() {
-  const config = loadConfig();
+  // 读取所有 Provider（包括停用的）
+  const allProviders = [];
+  const envPath = path.join(process.cwd(), '.env');
+  if (fs.existsSync(envPath)) {
+    const content = fs.readFileSync(envPath, 'utf-8');
+    for (let i = 1; i <= 50; i++) {
+      const urlMatch = content.match(new RegExp(`^UPSTREAM_${i}_URL=(.+)$`, 'm'));
+      if (urlMatch) {
+        const url = urlMatch[1].trim().replace(/\/$/, '');
+        const keyMatch = content.match(new RegExp(`^UPSTREAM_${i}_KEY=(.+)$`, 'm'));
+        const key = keyMatch ? keyMatch[1].trim() : '';
+        const nameMatch = content.match(new RegExp(`^UPSTREAM_${i}_NAME=(.+)$`, 'm'));
+        const name = nameMatch ? nameMatch[1].trim() : (isIFlowDomain(url) ? 'iFlow' : `provider-${i}`);
+        const signMatch = content.match(new RegExp(`^UPSTREAM_${i}_SIGN=(.+)$`, 'm'));
+        const sign = signMatch ? signMatch[1].trim().toLowerCase() !== 'false' : isIFlowDomain(url);
+        const enabledMatch = content.match(new RegExp(`^UPSTREAM_${i}_ENABLED=(.+)$`, 'm'));
+        const enabled = enabledMatch ? enabledMatch[1].trim().toLowerCase() !== 'false' : true;
+        allProviders.push({ index: i, name, url, key, sign, enabled });
+      }
+    }
+  }
 
-  if (config.upstreams.length === 0) {
+  if (allProviders.length === 0) {
     console.log('❌ 没有配置任何 Provider');
     console.log('运行 `iflow-relay provider add` 添加 Provider');
     return;
   }
 
-  console.log(`已配置 ${config.upstreams.length} 个 Provider:\n`);
+  const enabledCount = allProviders.filter(p => p.enabled).length;
+  const disabledCount = allProviders.length - enabledCount;
 
-  for (let i = 0; i < config.upstreams.length; i++) {
-    const u = config.upstreams[i];
-    console.log(`[${i + 1}] ${u.name}`);
-    console.log(`    URL: ${u.url}`);
-    console.log(`    Key: ${u.key.substring(0, 10)}...${u.key.substring(u.key.length - 4)}`);
-    console.log(`    Sign: ${u.sign ? '是 (iFlow)' : '否'}`);
+  console.log(`已配置 ${allProviders.length} 个 Provider (启用: ${enabledCount}, 停用: ${disabledCount}):\n`);
+
+  for (const p of allProviders) {
+    const status = p.enabled ? '✅' : '⛔';
+    console.log(`[${p.index}] ${status} ${p.name}`);
+    console.log(`    URL: ${p.url}`);
+    if (p.key) {
+      console.log(`    Key: ${p.key.substring(0, 10)}...${p.key.substring(p.key.length - 4)}`);
+    }
+    console.log(`    Sign: ${p.sign ? '是 (iFlow)' : '否'}`);
+    if (!p.enabled) {
+      console.log(`    状态: 已停用`);
+    }
     console.log('');
   }
 }
@@ -794,7 +843,8 @@ async function cmdProviderName() {
   try {
     console.log('已配置的 Provider:\n');
     config.upstreams.forEach((u, i) => {
-      console.log(`  [${i + 1}] ${u.name} - ${u.url}`);
+      const status = u.enabled ? '' : ' (已停用)';
+      console.log(`  [${i + 1}] ${u.name} - ${u.url}${status}`);
     });
 
     const numStr = await question(rl, '\n请输入要修改的 Provider 编号');
@@ -811,8 +861,112 @@ async function cmdProviderName() {
     }
 
     // 更新 .env 添加 UPSTREAM_X_NAME
-    updateEnvLine(`UPSTREAM_${num}_NAME`, newName.trim());
+    const idx = config.upstreams[num - 1].index;
+    updateEnvLine(`UPSTREAM_${idx}_NAME`, newName.trim());
     console.log(`\n✅ Provider ${num} 名称已设置为: ${newName.trim()}`);
+    console.log('重启 iflow-relay 使配置生效: npm start');
+  } finally {
+    rl.close();
+  }
+}
+
+async function cmdProviderDisable() {
+  const config = loadConfig();
+  if (config.upstreams.length === 0) {
+    console.log('❌ 没有配置任何 Provider');
+    console.log('运行 `iflow-relay provider add` 添加 Provider');
+    return;
+  }
+
+  const rl = createReadline();
+  try {
+    console.log('已配置的 Provider:\n');
+    config.upstreams.forEach((u, i) => {
+      const status = u.enabled ? '' : ' (已停用)';
+      console.log(`  [${i + 1}] ${u.name} - ${u.url}${status}`);
+    });
+
+    const numStr = await question(rl, '\n请输入要停用的 Provider 编号');
+    const num = parseInt(numStr, 10);
+    if (isNaN(num) || num < 1 || num > config.upstreams.length) {
+      console.log('❌ 无效的编号');
+      return;
+    }
+
+    const upstream = config.upstreams[num - 1];
+    if (!upstream.enabled) {
+      console.log(`\n⚠️  Provider ${num} (${upstream.name}) 已经是停用状态`);
+      return;
+    }
+
+    const confirm = await questionYesNo(rl, `确认停用 Provider ${num} (${upstream.name})?`);
+    if (confirm) {
+      const idx = upstream.index;
+      updateEnvLine(`UPSTREAM_${idx}_ENABLED`, 'false');
+      console.log(`\n✅ Provider ${num} (${upstream.name}) 已停用`);
+      console.log('重启 iflow-relay 使配置生效: npm start');
+    } else {
+      console.log('已取消');
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function cmdProviderEnable() {
+  const config = loadConfig();
+  if (config.upstreams.length === 0) {
+    console.log('❌ 没有配置任何 Provider');
+    console.log('运行 `iflow-relay provider add` 添加 Provider');
+    return;
+  }
+
+  // 找出所有 Provider（包括停用的）
+  const allProviders = [];
+  const envPath = path.join(process.cwd(), '.env');
+  if (fs.existsSync(envPath)) {
+    const content = fs.readFileSync(envPath, 'utf-8');
+    for (let i = 1; i <= 50; i++) {
+      const urlMatch = content.match(new RegExp(`^UPSTREAM_${i}_URL=(.+)$`, 'm'));
+      if (urlMatch) {
+        const url = urlMatch[1].trim().replace(/\/$/, '');
+        const nameMatch = content.match(new RegExp(`^UPSTREAM_${i}_NAME=(.+)$`, 'm'));
+        const name = nameMatch ? nameMatch[1].trim() : (isIFlowDomain(url) ? 'iFlow' : `provider-${i}`);
+        const enabledMatch = content.match(new RegExp(`^UPSTREAM_${i}_ENABLED=(.+)$`, 'm'));
+        const enabled = enabledMatch ? enabledMatch[1].trim().toLowerCase() !== 'false' : true;
+        allProviders.push({ index: i, name, url, enabled });
+      }
+    }
+  }
+
+  if (allProviders.length === 0) {
+    console.log('❌ 没有配置任何 Provider');
+    return;
+  }
+
+  const disabled = allProviders.filter(p => !p.enabled);
+  if (disabled.length === 0) {
+    console.log('✅ 所有 Provider 都已启用');
+    return;
+  }
+
+  const rl = createReadline();
+  try {
+    console.log('已停用的 Provider:\n');
+    disabled.forEach((p, i) => {
+      console.log(`  [${i + 1}] ${p.name} - ${p.url}`);
+    });
+
+    const numStr = await question(rl, '\n请输入要启用的 Provider 编号');
+    const num = parseInt(numStr, 10);
+    if (isNaN(num) || num < 1 || num > disabled.length) {
+      console.log('❌ 无效的编号');
+      return;
+    }
+
+    const provider = disabled[num - 1];
+    updateEnvLine(`UPSTREAM_${provider.index}_ENABLED`, 'true');
+    console.log(`\n✅ Provider (${provider.name}) 已启用`);
     console.log('重启 iflow-relay 使配置生效: npm start');
   } finally {
     rl.close();
@@ -1104,6 +1258,8 @@ iflow-relay CLI - 管理 iflow-relay 代理
   provider remove             删除 Provider
   provider test               测试 Provider 连接
   provider name               设置 Provider 名称
+  provider disable            停用 Provider
+  provider enable             启用 Provider
   config get <KEY>            获取配置值
   config set <KEY> <VALUE>    设置配置值
   config list                 列出所有配置
@@ -1150,8 +1306,12 @@ async function main() {
         await cmdProviderTest();
       } else if (subCmd === 'name') {
         await cmdProviderName();
+      } else if (subCmd === 'disable') {
+        await cmdProviderDisable();
+      } else if (subCmd === 'enable') {
+        await cmdProviderEnable();
       } else {
-        console.log('用法: iflow-relay provider <list|add|remove|test|name>');
+        console.log('用法: iflow-relay provider <list|add|remove|test|name|disable|enable>');
       }
       break;
     case 'config':
