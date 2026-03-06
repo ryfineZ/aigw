@@ -385,7 +385,7 @@ function updateEnvLine(key, value) {
   fs.writeFileSync(envPath, newLines.join('\n'), 'utf-8');
 }
 
-function addProviderToEnv(url, key, sign, name, models = null) {
+function addProviderToEnv(url, key, sign, name, models = null, setDefaultModel = true) {
   const envPath = ENV_FILE;
   let content = '';
   if (fs.existsSync(envPath)) {
@@ -407,9 +407,10 @@ function addProviderToEnv(url, key, sign, name, models = null) {
   if (models && models.length > 0) {
     const modelList = Array.isArray(models) ? models : [models];
     newContent += `UPSTREAM_${num}_MODELS=${modelList.join(',')}\n`;
-    // 第一个模型作为默认模型
-    if (!content.includes('DEFAULT_MODEL=')) {
-      newContent += `DEFAULT_MODEL=${modelList[0]}\n`;
+
+    // 如果用户选择设置默认模型，写入带 provider 前缀的格式
+    if (setDefaultModel && !content.includes('DEFAULT_MODEL=')) {
+      newContent += `DEFAULT_MODEL=${providerName}/${modelList[0]}\n`;
     }
   }
 
@@ -662,11 +663,20 @@ async function cmdProviderAdd() {
         const inputName = await question(rl, 'Provider 名称', defaultName);
         const providerName = inputName.trim() || defaultName;
 
-        const { num, name } = addProviderToEnv(url, key, isIFlow, providerName, models);
+        // 询问是否设置为默认模型
+        let setDefaultModel = false;
+        if (models && models.length > 0) {
+          const setDefault = await questionYesNo(rl, `\n是否将 ${providerName}/${models[0]} 设为默认模型?`);
+          setDefaultModel = setDefault;
+        }
+
+        const { num, name } = addProviderToEnv(url, key, isIFlow, providerName, models, setDefaultModel);
         console.log(`\n✅ Provider ${num} (${name}) 已保存到 .env`);
         if (models && models.length > 0) {
           console.log(`   模型列表: ${models.join(', ')}`);
-          console.log(`   默认模型: ${models[0]}`);
+          if (setDefaultModel) {
+            console.log(`   默认模型: ${providerName}/${models[0]}`);
+          }
         }
 
         // 尝试热重载
