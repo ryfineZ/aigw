@@ -273,7 +273,7 @@ async function testProvider(url, key, fullModels = false) {
         'accept': '*/*',
       },
       body: JSON.stringify({
-        model: 'test',
+        model: 'glm-5',
         messages: [{ role: 'user', content: 'hi' }],
         max_tokens: 1,
       }),
