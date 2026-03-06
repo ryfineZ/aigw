@@ -650,7 +650,11 @@ async function cmdProviderAdd() {
           console.log(`   模型列表: ${models.join(', ')}`);
           console.log(`   默认模型: ${models[0]}`);
         }
-        console.log('重启 aigw 使配置生效: npm start');
+
+        // 尝试热重载
+        await tryReload();
+
+        console.log('提示: 如需更新调度权重，运行 aigw reload');
       } else {
         console.log('\n已取消保存');
       }
@@ -1259,6 +1263,134 @@ async function cmdModel() {
   }
 }
 
+async function cmdVisionModel() {
+  const envPath = ENV_FILE;
+
+  // 读取当前视觉模型配置
+  let currentVisionModel = '';
+  if (fs.existsSync(envPath)) {
+    const content = fs.readFileSync(envPath, 'utf-8');
+    const match = content.match(/^MM_EXTRACTOR_MODEL=(.+)$/m);
+    if (match) {
+      currentVisionModel = match[1].trim();
+    }
+  }
+
+  console.log('视觉模型设置\n');
+  console.log(`当前视觉模型: ${currentVisionModel || '(未设置)'}`);
+  console.log('');
+  console.log('视觉模型用于处理图片请求，将图片内容提取为文本。');
+  console.log('支持 provider/model 格式指定 Provider。');
+  console.log('');
+
+  const rl = createReadline();
+  try {
+    // 获取可用的视觉模型
+    console.log('正在获取可用的视觉模型...\n');
+    const config = loadConfig();
+    const visionModels = [];
+
+    for (const upstream of config.upstreams) {
+      try {
+        const result = await testProvider(upstream.url, upstream.key, true);
+        if (result.success && result.allModels) {
+          // 过滤视觉模型
+          const vlModels = result.allModels.filter(m =>
+            m.includes('vl') || m.includes('vision') || m.includes('qwen-vl') || m.includes('glm-4v')
+          );
+          if (vlModels.length > 0) {
+            console.log(`[${upstream.name}]`);
+            vlModels.forEach(m => {
+              console.log(`  ${m}  (${upstream.name}/${m})`);
+              visionModels.push({ id: m, provider: upstream.name, alias: `${upstream.name}/${m}` });
+            });
+            console.log('');
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (visionModels.length === 0) {
+      console.log('⚠️  未找到视觉模型，请手动输入。');
+    }
+
+    const input = await question(rl, '\n请输入视觉模型 (格式: provider/model 或 model)', currentVisionModel);
+    const visionModel = input.trim();
+
+    if (!visionModel) {
+      console.log('❌ 视觉模型不能为空');
+      return;
+    }
+
+    // 更新 .env
+    let content = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
+    const lines = content.split('\n');
+    let found = false;
+    const newLines = lines.map(line => {
+      if (line.startsWith('MM_EXTRACTOR_MODEL=')) {
+        found = true;
+        return `MM_EXTRACTOR_MODEL=${visionModel}`;
+      }
+      return line;
+    });
+
+    if (!found) {
+      // 找到 MM_ENABLED 后面插入
+      const mmIdx = newLines.findIndex(l => l.startsWith('MM_ENABLED='));
+      if (mmIdx >= 0) {
+        newLines.splice(mmIdx + 1, 0, `MM_EXTRACTOR_MODEL=${visionModel}`);
+      } else {
+        newLines.push(`MM_EXTRACTOR_MODEL=${visionModel}`);
+      }
+    }
+
+    fs.writeFileSync(envPath, newLines.join('\n'), 'utf-8');
+    console.log(`\n✅ 视觉模型已设置为: ${visionModel}`);
+    console.log('重启 aigw 使配置生效: npm start');
+  } finally {
+    rl.close();
+  }
+}
+
+// 尝试热重载（静默）
+async function tryReload() {
+  const config = loadConfig();
+  const baseUrl = `http://localhost:${config.port}`;
+
+  try {
+    await httpRequest(`${baseUrl}/admin/reload`, {
+      method: 'POST',
+      timeout: 3000,
+    });
+  } catch (_) {
+    // 静默失败，服务可能未运行
+  }
+}
+
+async function cmdReload() {
+  const config = loadConfig();
+  const baseUrl = `http://localhost:${config.port}`;
+
+  try {
+    const response = await httpRequest(`${baseUrl}/admin/reload`, {
+      method: 'POST',
+      timeout: 5000,
+    });
+
+    if (response.statusCode === 200) {
+      const result = JSON.parse(response.data);
+      console.log('✅ 配置已热重载');
+      console.log(`   Provider 数量: ${result.providerCount}`);
+      console.log(`   调度策略: ${result.strategy}`);
+    } else {
+      console.log('❌ 热重载失败:', response.statusCode);
+    }
+  } catch (err) {
+    console.log('❌ 无法连接到 aigw 服务');
+    console.log('确保服务正在运行: npm start');
+  }
+}
+
 async function cmdStrategy() {
   const envPath = ENV_FILE;
 
@@ -1535,7 +1667,9 @@ aigw CLI - 管理 aigw 代理
 命令:
   models                      列出所有可用模型（含来源和别名）
   model                       交互式选择默认模型
+  vision-model                设置视觉提取模型
   strategy                    设置调度策略
+  reload                      热重载配置（无需重启）
   provider list               列出已配置的 Provider
   provider add                交互式添加 Provider
   provider add-iflow          从 iFlow CLI 添加 iFlow Provider
@@ -1567,9 +1701,10 @@ aigw CLI - 管理 aigw 代理
 示例:
   aigw models
   aigw model                          # 交互式选择默认模型
-  aigw strategy                       # 交互式选择调度策略
+  aigw vision-model                   # 设置视觉模型
+  aigw strategy                       # 设置调度策略
+  aigw reload                         # 热重载配置
   aigw provider add
-  aigw provider add-iflow
   aigw config set DEFAULT_MODEL iFlow/qwen3-max
 `);
 }
@@ -1590,6 +1725,13 @@ async function main() {
       break;
     case 'strategy':
       await cmdStrategy();
+      break;
+    case 'vision-model':
+    case 'vision':
+      await cmdVisionModel();
+      break;
+    case 'reload':
+      await cmdReload();
       break;
     case 'provider':
       if (subCmd === 'list') {

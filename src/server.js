@@ -107,35 +107,36 @@ function pickRoundRobin(upstreams) {
 }
 
 // ─── EMA fastest ──────────────────────────────────────────────────────────────
-const upstreamStats = []; // { ema: number, count: number }[]
-let probeCounter = 0;
-const PROBE_INTERVAL = 20; // 每20次请求探测一次非最优上游
+const upstreamStats = []; // { ema: number, count: number, initialized: boolean }[]
 
 function ensureStats(n) {
-  while (upstreamStats.length < n) upstreamStats.push({ ema: 0, count: 0 });
+  while (upstreamStats.length < n) upstreamStats.push({ ema: 0, count: 0, initialized: false });
 }
 
 function pickFastest(upstreams, excludeIdx = -1) {
   if (upstreams.length === 1) return { upstream: upstreams[0], idx: 0 };
   ensureStats(upstreams.length);
 
+  // 优先选择未初始化的 Provider（让它在下一次请求时获得机会）
+  for (let i = 0; i < upstreams.length; i++) {
+    if (i === excludeIdx) continue;
+    if (!upstreamStats[i].initialized) {
+      return { upstream: upstreams[i], idx: i };
+    }
+  }
+
   // 正常选最快
   let bestIdx = -1, bestEma = Infinity;
   for (let i = 0; i < upstreams.length; i++) {
     if (i === excludeIdx) continue;
-    const ema = upstreamStats[i].count === 0 ? 0 : upstreamStats[i].ema;
+    if (upstreamStats[i].count === 0) continue;
+    const ema = upstreamStats[i].ema;
     if (ema < bestEma) { bestEma = ema; bestIdx = i; }
   }
-  if (bestIdx < 0) bestIdx = excludeIdx === 0 ? 1 : 0;
 
-  // 探测：每 PROBE_INTERVAL 次，强制选数据最陈旧的非最优上游
-  if (excludeIdx < 0 && ++probeCounter % PROBE_INTERVAL === 0) {
-    let staleIdx = -1, minCount = Infinity;
-    for (let i = 0; i < upstreams.length; i++) {
-      if (i === bestIdx) continue;
-      if (upstreamStats[i].count < minCount) { minCount = upstreamStats[i].count; staleIdx = i; }
-    }
-    if (staleIdx >= 0) return { upstream: upstreams[staleIdx], idx: staleIdx };
+  if (bestIdx < 0) {
+    // 所有都没有数据，选第一个可用的
+    bestIdx = excludeIdx === 0 ? 1 : 0;
   }
 
   return { upstream: upstreams[bestIdx], idx: bestIdx };
@@ -146,6 +147,55 @@ function recordLatency(idx, ms) {
   const s = upstreamStats[idx];
   s.ema = s.count === 0 ? ms : 0.2 * ms + 0.8 * s.ema;
   s.count++;
+  s.initialized = true;
+}
+
+// 初始化 Provider 延迟（热重载后调用）
+async function initializeProviderLatency(cfg) {
+  const https = require('https');
+  const http = require('http');
+
+  for (let i = 0; i < cfg.upstreams.length; i++) {
+    const upstream = cfg.upstreams[i];
+    if (upstream.enabled === false) continue;
+
+    // 检查是否已有数据
+    ensureStats(i + 1);
+    if (upstreamStats[i].initialized) continue;
+
+    // 异步测试延迟
+    const startTime = Date.now();
+    const url = new URL(upstream.url + '/models');
+    const lib = url.protocol === 'https:' ? https : http;
+
+    const req = lib.request({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname,
+      method: 'GET',
+      headers: { 'authorization': `Bearer ${upstream.key}` },
+      timeout: 5000,
+    }, (res) => {
+      const latency = Date.now() - startTime;
+      if (res.statusCode === 200 || res.statusCode === 401 || res.statusCode === 403) {
+        recordLatency(i, latency);
+        console.log(`[server] Provider ${upstream.name} latency: ${latency}ms`);
+      }
+    });
+
+    req.on('error', () => {
+      recordLatency(i, 9999); // 失败时设置高延迟
+      console.log(`[server] Provider ${upstream.name} test failed`);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      recordLatency(i, 9999);
+      console.log(`[server] Provider ${upstream.name} test timeout`);
+    });
+
+    req.end();
+  }
 }
 
 let runtimeStrategy = null; // null = 使用 cfg.upstreamStrategy
@@ -236,6 +286,35 @@ function handleAdminStrategy(cfg, req, res) {
     res.writeHead(200);
     res.end(JSON.stringify({ strategy: runtimeStrategy }));
   });
+}
+
+function handleAdminReload(req, res) {
+  if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
+  try {
+    // 清除 require 缓存并重新加载配置
+    delete require.cache[require.resolve('./config.js')];
+    const newCfg = require('./config.js').load();
+
+    // 更新全局配置引用
+    Object.assign(cfg, newCfg);
+
+    // 重置统计
+    upstreamStats.length = 0;
+
+    // 初始化新 Provider 的延迟
+    initializeProviderLatency(cfg);
+
+    res.setHeader('Content-Type', 'application/json');
+    res.writeHead(200);
+    res.end(JSON.stringify({
+      success: true,
+      providerCount: cfg.upstreams.length,
+      strategy: cfg.upstreamStrategy
+    }));
+  } catch (err) {
+    console.error('[server] reload error:', err);
+    writeError(res, 500, err.message);
+  }
 }
 
 function writeError(res, code, message) {
@@ -1302,6 +1381,7 @@ function createHandler(cfg) {
       if (url.startsWith('/v1/models/')) return handleModelByID(cfg, req, res, url.slice('/v1/models/'.length));
       if (url.startsWith('/models/')) return handleModelByID(cfg, req, res, url.slice('/models/'.length));
       if (url === '/admin/upstream-strategy') return handleAdminStrategy(cfg, req, res);
+      if (url === '/admin/reload') return handleAdminReload(req, res);
       if (url === '/v1/messages/count_tokens' || url === '/messages/count_tokens') return await handleAnthropicCountTokens(cfg, req, res);
       if (url === '/v1/messages' || url === '/messages') return await handleAnthropicMessages(cfg, req, res);
       if (url === '/v1/chat/completions' || url === '/chat/completions') return await handleOpenAICompletions(cfg, req, res);
