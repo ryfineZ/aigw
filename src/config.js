@@ -205,13 +205,69 @@ function updateEnvIFlowKey(newKey) {
   }
 }
 
+/**
+ * 自动添加 iFlow Provider 到 .env 文件
+ * @param {Object} cliCreds - 从 ~/.iflow/settings.json 读取的凭证
+ */
+function autoAddIFlowProvider(cliCreds) {
+  if (!cliCreds.apiKey) {
+    console.log('[config] No iFlow CLI credentials found, skipping auto-add');
+    return false;
+  }
+
+  const envPath = path.join(process.cwd(), '.env');
+  try {
+    let content = '';
+    if (fs.existsSync(envPath)) {
+      content = fs.readFileSync(envPath, 'utf-8');
+    }
+
+    const now = new Date().toISOString().split('T')[0];
+    const url = cliCreds.baseUrl || 'https://apis.iflow.cn/v1';
+
+    // 构建新的 Provider 配置
+    const newProvider = `\n# Provider 1: iFlow (auto-added ${now})
+UPSTREAM_1_URL=${url}
+UPSTREAM_1_KEY=${cliCreds.apiKey}
+UPSTREAM_1_SIGN=true
+UPSTREAM_1_NAME=iFlow
+`;
+
+    // 检查是否已有 UPSTREAM_1 配置
+    if (content.includes('UPSTREAM_1_URL=') || content.includes('UPSTREAM_1_KEY=')) {
+      console.log('[config] UPSTREAM_1 already exists in .env, skipping auto-add');
+      return false;
+    }
+
+    // 添加新 Provider
+    const newContent = content.trimEnd() + newProvider;
+    fs.writeFileSync(envPath, newContent, 'utf-8');
+    console.log(`[config] Auto-added iFlow provider to .env (${url})`);
+    return true;
+  } catch (err) {
+    console.warn(`[config] Failed to auto-add iFlow provider: ${err.message}`);
+    return false;
+  }
+}
+
 function load() {
   // 尝试从 iFlow CLI 配置获取凭证
   const cliCreds = getIFlowCLICredentials();
 
-  // 如果 iFlow CLI 有新 key，自动更新 .env
-  if (cliCreds.apiKey) {
-    updateEnvIFlowKey(cliCreds.apiKey);
+  // 检查是否已配置 upstream
+  const hasUpstreams = !!getEnv('UPSTREAMS', '') || !!getEnv('UPSTREAM_1_KEY', '');
+
+  // 如果没有配置任何 upstream，且有 iFlow CLI 凭证，自动添加 iFlow Provider
+  if (!hasUpstreams && cliCreds.apiKey) {
+    console.log('[config] No upstream configured, auto-adding iFlow provider from CLI credentials...');
+    autoAddIFlowProvider(cliCreds);
+  }
+  // 如果已有 iFlow Provider（UPSTREAM_1 是 iFlow 域名），更新其 Key
+  else if (cliCreds.apiKey && hasUpstreams) {
+    const upstream1Url = getEnv('UPSTREAM_1_URL', '');
+    if (isIFlowDomain(upstream1Url)) {
+      updateEnvIFlowKey(cliCreds.apiKey);
+    }
   }
 
   // API Key 获取优先级：
@@ -229,8 +285,9 @@ function load() {
     return [];
   })();
 
-  const hasUpstreams = !!getEnv('UPSTREAMS', '') || !!getEnv('UPSTREAM_1_KEY', '');
-  if (apiKeys.length === 0 && !hasUpstreams) {
+  // 重新读取 .env 以获取自动添加的配置
+  const hasUpstreamsCheck = !!getEnv('UPSTREAMS', '') || !!getEnv('UPSTREAM_1_KEY', '');
+  if (apiKeys.length === 0 && !hasUpstreamsCheck) {
     console.error('ERROR: No API key found. Options:');
     console.error('  1. Set IFLOW_API_KEY environment variable');
     console.error('  2. Run "iflow login" to authenticate with iFlow CLI');
